@@ -95,8 +95,22 @@ export async function takeMemSnapshot(): Promise<{ ok: boolean; error?: string; 
   devtoolsNetwork.setCdpEventListener(listener)
   try {
     const t0 = Date.now()
-    // 慢快照可能数十秒才传完 chunk，给足 90s 余量；call 内部默认 60s 兜底其他命令
-    const resp = (await devtoolsNetwork.call('HeapProfiler.takeHeapSnapshot', undefined, 90000)) as { error?: { message?: string } } | undefined
+    // 完成信号二选一（真机实测 RN 0.81 / Hermes + Metro inspector）：
+    // ① CDP response 到达（iOS 模拟器实测 258MB/76s 完整传输后正常返回）；
+    // ② Android 真机大堆：chunk 推到 ~75MB / ~7.5s 时设备端主动断开连接
+    //    （close reason "Connection lost to corresponding device"，数据在数字中间截断，
+    //    最终 response 永远不来）。②情况下「连接关闭」必须算完成信号并转入截断报错，
+    //    否则会白等 90s 超时。超时给足 300s 兼容 iOS 慢快照（反正 ② 会被 close 提前唤醒）。
+    let resolveClosed!: (v: 'closed') => void
+    const closedP = new Promise<'closed'>((r) => {
+      resolveClosed = r
+    })
+    const unsubClose = devtoolsNetwork.onceSocketClose(() => resolveClosed('closed'))
+    const resp = (await Promise.race([
+      devtoolsNetwork.call('HeapProfiler.takeHeapSnapshot', undefined, 300000),
+      closedP
+    ])) as 'closed' | { error?: { message?: string } } | undefined
+    unsubClose()
     // response 返回后等 chunk 流静默（个别实现 response 先于末尾 chunk）
     while (Date.now() - lastChunkAt < 1200) {
       await new Promise((r) => setTimeout(r, 200))
@@ -116,6 +130,19 @@ export async function takeMemSnapshot(): Promise<{ ok: boolean; error?: string; 
     return { ok: true, summary }
   } catch (e) {
     devtoolsNetwork.setCdpEventListener(null)
+    // 截断检测：Android 真机大堆快照在 ~75MB / ~7.5s 处会被设备端断开（平台硬伤，
+    // 数据在数字中间被切、JSON 必然解析失败），给出可读原因与替代方案而非裸 JSON 错误
+    if (chunks.length > 0) {
+      const mb = Math.round(chunks.reduce((a, x) => a + x.length, 0) / 1048576)
+      return {
+        ok: false,
+        error:
+          `快照传输不完整（收到 ${mb}MB 后设备连接被断开）：Android 真机经 Metro inspector ` +
+          `通道传大快照有硬上限（实测约 7.5 秒 / ~75MB，与连接竞争无关，GC 后仍复现），` +
+          `Chrome DevTools 走同一通道同样受限。建议：改用「分配采样」定位泄漏；或先 GC、` +
+          `退出重页面减小堆占用后重试；iOS 模拟器不受此限制（实测 258MB 可完整传输）。`
+      }
+    }
     return { ok: false, error: String((e as Error).message || e) }
   }
 }

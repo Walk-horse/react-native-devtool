@@ -2202,6 +2202,28 @@ body.col-resizing .splitter::after {
   gap: 8px;
   padding: 6px 12px;
 }
+.np-check {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  font-size: 12px;
+  color: var(--text-2, #8a8f99);
+  user-select: none;
+  cursor: pointer;
+}
+.np-check input {
+  margin: 0;
+  cursor: pointer;
+}
+.np-input.num {
+  width: 64px;
+  padding: 3px 6px;
+  font-size: 12px;
+}
+.mem-bar .countdown {
+  color: var(--accent, #3b82f6);
+  font-weight: 600;
+}
 .mem-snaps {
   display: flex;
   flex-direction: column;

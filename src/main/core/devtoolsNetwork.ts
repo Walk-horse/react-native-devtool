@@ -286,6 +286,8 @@ export class DevtoolsNetwork {
   private reconnectTimer?: NodeJS.Timeout
   private cmdSeq = 1
   private waiting = new Map<number, (r: unknown) => void>()
+  /** 一次性 socket 关闭回调（堆快照等流式命令以「chunk 推完后 Metro 主动关连接」作为完成信号） */
+  private closeCbs = new Set<() => void>()
   private openedAt = 0
   private lastReplyAt = 0
   /** 最近一次注入得到的运行时令牌（用于识别 App 是否已重载） */
@@ -313,6 +315,19 @@ export class DevtoolsNetwork {
   /** CDP 事件转发（HeapProfiler.addHeapSnapshotChunk 等流式事件），内存采集等模块订阅 */
   setCdpEventListener(cb: ((method: string, params: Record<string, unknown>) => void) | null) {
     this.cdpEventCb = cb
+  }
+
+  /**
+   * 订阅当前调试连接的关闭（一次性），返回取消订阅函数。
+   * 实测（RN 0.81 / Hermes + Metro inspector）：HeapProfiler.takeHeapSnapshot 把 chunk
+   * 全部推完后 Metro 会以 code 1000 主动关闭连接，最终的 CDP response 常来不及送达 ——
+   * 堆快照等流式命令必须把「连接关闭」也当作完成信号，否则永远等不到响应。
+   */
+  onceSocketClose(cb: () => void): () => void {
+    this.closeCbs.add(cb)
+    return () => {
+      this.closeCbs.delete(cb)
+    }
   }
 
   /** 内存页等外部模块用：当前目标的可读标签（appId @ deviceName） */
@@ -590,6 +605,15 @@ export class DevtoolsNetwork {
       if (this.heartbeatTimer) clearInterval(this.heartbeatTimer)
       this.heartbeatTimer = undefined
       this.emitStatus()
+      const cbs = [...this.closeCbs]
+      this.closeCbs.clear()
+      for (const cb of cbs) {
+        try {
+          cb()
+        } catch {
+          /* ignore */
+        }
+      }
       if (this.running) {
         this.log('warn', 'devtools 抓包：连接已断开，等待重连…')
         this.scheduleReconnect()

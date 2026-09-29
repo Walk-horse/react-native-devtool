@@ -5,7 +5,7 @@
  * - 分配采样：HeapProfiler.startSampling/stopSampling，Top 自分配站点定位分配热点；
  * - 依赖 DevTools 通道（网络页开始抓包后可用），通道独占所以不能另开连接。
  */
-import { useEffect, useMemo, useState } from 'react'
+import { useEffect, useMemo, useRef, useState } from 'react'
 import {
   MemClassRow,
   MemDiffRow,
@@ -27,6 +27,10 @@ export default function MemoryPanel() {
   const [sortKey, setSortKey] = useState<'selfSize' | 'count' | 'name'>('selfSize')
   const [sample, setSample] = useState<MemSampleResult | null>(null)
   const [sampling, setSampling] = useState(false)
+  const [autoStop, setAutoStop] = useState(true)
+  const [durationSec, setDurationSec] = useState(30)
+  const [remaining, setRemaining] = useState<number | null>(null)
+  const timerRef = useRef<{ countdown?: ReturnType<typeof setInterval>; stop?: ReturnType<typeof setTimeout> }>({})
   const [channelOk, setChannelOk] = useState<boolean | null>(null)
 
   const refresh = async () => {
@@ -42,6 +46,8 @@ export default function MemoryPanel() {
     return () => {
       off()
       offP()
+      if (timerRef.current.countdown) clearInterval(timerRef.current.countdown)
+      if (timerRef.current.stop) clearTimeout(timerRef.current.stop)
     }
   }, [])
 
@@ -72,13 +78,20 @@ export default function MemoryPanel() {
     })
   }
 
-  const startSampling = async () => {
-    setErr(null)
-    const r = await window.api.memSampleStart()
-    if (!r.ok) setErr(r.error || '启动失败')
-    else setSampling(true)
+  const clearTimer = () => {
+    if (timerRef.current.countdown) {
+      clearInterval(timerRef.current.countdown)
+      timerRef.current.countdown = undefined
+    }
+    if (timerRef.current.stop) {
+      clearTimeout(timerRef.current.stop)
+      timerRef.current.stop = undefined
+    }
+    setRemaining(null)
   }
+
   const stopSampling = async () => {
+    clearTimer()
     setBusy('正在停止采样并聚合…')
     try {
       const r = await window.api.memSampleStop()
@@ -87,6 +100,37 @@ export default function MemoryPanel() {
       setSampling(false)
     } finally {
       setBusy('')
+    }
+  }
+
+  const startSampling = async () => {
+    setErr(null)
+    setRemaining(null)
+    const r = await window.api.memSampleStart()
+    if (!r.ok) {
+      setErr(r.error || '启动失败')
+      return
+    }
+    setSampling(true)
+    // 自动停止计时：到点自动调用停止采样，无需手动点
+    if (autoStop && durationSec > 0) {
+      let left = durationSec
+      setRemaining(left)
+      timerRef.current.countdown = setInterval(() => {
+        left -= 1
+        if (left <= 0) {
+          if (timerRef.current.countdown) {
+            clearInterval(timerRef.current.countdown)
+            timerRef.current.countdown = undefined
+          }
+          setRemaining(0)
+        } else {
+          setRemaining(left)
+        }
+      }, 1000)
+      timerRef.current.stop = setTimeout(() => {
+        void stopSampling()
+      }, durationSec * 1000)
     }
   }
 
@@ -282,16 +326,48 @@ export default function MemoryPanel() {
         <>
           <div className="mem-bar">
             {!sampling ? (
-              <button className="btn sm primary" onClick={startSampling} disabled={!!busy}>
-                开始采样
-              </button>
+              <>
+                <button className="btn sm primary" onClick={startSampling} disabled={!!busy}>
+                  开始采样
+                </button>
+                <label className="np-check" title="到点自动停止采样">
+                  <input
+                    type="checkbox"
+                    checked={autoStop}
+                    onChange={(e) => setAutoStop(e.target.checked)}
+                  />
+                  自动停止
+                </label>
+                <input
+                  className="np-input num"
+                  type="number"
+                  min={1}
+                  max={3600}
+                  value={durationSec}
+                  disabled={!autoStop}
+                  onChange={(e) =>
+                    setDurationSec(Math.max(1, Math.min(3600, Math.floor(Number(e.target.value) || 30))))
+                  }
+                  title="自动停止时长（秒）"
+                />
+                <span className="np-hint inline">秒后自动停止</span>
+              </>
             ) : (
-              <button className="btn sm primary" onClick={stopSampling} disabled={!!busy}>
-                停止采样
-              </button>
+              <>
+                <button className="btn sm primary" onClick={stopSampling} disabled={!!busy}>
+                  停止采样
+                </button>
+                {autoStop && remaining !== null && (
+                  <span className="np-hint inline countdown">自动停止倒计时：{remaining}s</span>
+                )}
+              </>
             )}
             <span className="np-hint inline">
-              {sampling ? '采样中：在 App 里复现操作，然后点「停止采样」' : '记录采样期间的 JS 分配热点（低开销）'}
+              {sampling
+                ? autoStop
+                  ? '采样中：在 App 里复现操作，到点自动停止'
+                  : '采样中：在 App 里复现操作，然后点「停止采样」'
+                : '记录采样期间的 JS 分配热点（低开销）'}
             </span>
           </div>
           {err && <div className="np-hint warn">{err}</div>}
